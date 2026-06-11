@@ -1,0 +1,442 @@
+---
+- name: Provision Dark Software Factory VPS Foundation
+  hosts: "{{ lookup('env', 'ANSIBLE_TARGET_GROUP') | default('factory_vps', true) }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    project_name: "{{ lookup('env', 'PROJECT_NAME') | default('dark-software-factory', true) }}"
+    deploy_user: "{{ lookup('env', 'DEPLOY_USER') | default('deploy', true) }}"
+    app_root: "{{ lookup('env', 'APP_ROOT') }}"
+    app_old_root: "{{ lookup('env', 'APP_OLD_ROOT') }}"
+    sudoers_file_name: "{{ lookup('env', 'SUDOERS_FILE_NAME') }}"
+
+    docker_apt_arch: "{{ lookup('env', 'DOCKER_APT_ARCH') | default('amd64', true) }}"
+    docker_log_max_size: "{{ lookup('env', 'DOCKER_LOG_MAX_SIZE') | default('10m', true) }}"
+    docker_log_max_file: "{{ lookup('env', 'DOCKER_LOG_MAX_FILE') | default('3', true) }}"
+
+    install_bun: "{{ lookup('env', 'INSTALL_BUN') | default('false', true) | lower in ['1', 'true', 'yes', 'on'] }}"
+    bun_install_dir: "{{ lookup('env', 'BUN_INSTALL_DIR') | default('/opt/bun', true) }}"
+
+    enable_swap: "{{ lookup('env', 'ENABLE_SWAP') | default('true', true) | lower in ['1', 'true', 'yes', 'on'] }}"
+    swap_file_path: "{{ lookup('env', 'SWAP_FILE_PATH') | default('/swapfile', true) }}"
+    swap_size: "{{ lookup('env', 'SWAP_SIZE') | default('2G', true) }}"
+    swap_swappiness: "{{ lookup('env', 'SWAP_SWAPPINESS') | default('10', true) }}"
+    swap_vfs_cache_pressure: "{{ lookup('env', 'SWAP_VFS_CACHE_PRESSURE') | default('50', true) }}"
+
+    enable_public_routing: "{{ lookup('env', 'ENABLE_PUBLIC_ROUTING') | default('false', true) | lower in ['1', 'true', 'yes', 'on'] }}"
+    public_firewall_ports: "{{ lookup('env', 'PUBLIC_FIREWALL_PORTS').split(',') }}"
+    web_domain: "{{ lookup('env', 'WEB_DOMAIN') }}"
+    web_upstream_url: "http://localhost:{{ lookup('env', 'WEB_UPSTREAM_PORT') }}"
+    api_domain: "{{ lookup('env', 'API_DOMAIN') }}"
+    api_upstream_url: "http://localhost:{{ lookup('env', 'API_UPSTREAM_PORT') }}"
+    acme_email: "{{ lookup('env', 'ACME_EMAIL') }}"
+    nginx_site_name: "{{ lookup('env', 'NGINX_SITE_NAME') }}"
+    configure_public_routing: "{{ (enable_public_routing | bool) and web_domain | length > 0 and api_domain | length > 0 }}"
+
+    install_seed_helper: "{{ lookup('env', 'INSTALL_SEED_HELPER') | default('false', true) | lower in ['1', 'true', 'yes', 'on'] }}"
+    seed_helper_name: "{{ lookup('env', 'SEED_HELPER_NAME') }}"
+    seed_compose_service: "{{ lookup('env', 'SEED_COMPOSE_SERVICE') }}"
+    seed_node_script: "{{ lookup('env', 'SEED_NODE_SCRIPT') }}"
+
+  tasks:
+    - name: Install essential packages
+      ansible.builtin.apt:
+        name:
+          - ufw
+          - fail2ban
+          - curl
+          - gnupg
+          - ca-certificates
+          - cron
+          - unzip
+        state: present
+        update_cache: true
+
+    - name: Check active swap devices
+      ansible.builtin.command: swapon --show=NAME --noheadings
+      changed_when: false
+      register: active_swap_devices
+      when: enable_swap | bool
+
+    - name: Create swap file
+      ansible.builtin.command:
+        cmd: "fallocate -l {{ swap_size }} {{ swap_file_path }}"
+        creates: "{{ swap_file_path }}"
+      when: enable_swap | bool
+
+    - name: Set swap file permissions
+      ansible.builtin.file:
+        path: "{{ swap_file_path }}"
+        owner: root
+        group: root
+        mode: '0600'
+      when: enable_swap | bool
+
+    - name: Format swap file
+      ansible.builtin.command: "mkswap {{ swap_file_path }}"
+      changed_when: true
+      when:
+        - enable_swap | bool
+        - swap_file_path not in active_swap_devices.stdout_lines
+
+    - name: Enable swap file
+      ansible.builtin.command: "swapon {{ swap_file_path }}"
+      changed_when: true
+      when:
+        - enable_swap | bool
+        - swap_file_path not in active_swap_devices.stdout_lines
+
+    - name: Persist swap file
+      ansible.builtin.mount:
+        name: none
+        src: "{{ swap_file_path }}"
+        fstype: swap
+        opts: sw
+        passno: '0'
+        dump: '0'
+        state: present
+      when: enable_swap | bool
+
+    - name: Tune swap behavior
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { name: 'vm.swappiness', value: "{{ swap_swappiness }}" }
+        - { name: 'vm.vfs_cache_pressure', value: "{{ swap_vfs_cache_pressure }}" }
+      when: enable_swap | bool
+
+    - name: Configure UFW defaults
+      community.general.ufw:
+        state: enabled
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+
+    - name: Allow SSH
+      community.general.ufw:
+        rule: allow
+        port: "{{ ansible_port | default(22) }}"
+        proto: tcp
+
+    - name: Allow public routing ports
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ public_firewall_ports }}"
+      when: enable_public_routing | bool
+
+    - name: Create deploy user
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        groups: sudo
+        append: true
+
+    - name: Create deploy user SSH directory
+      ansible.builtin.file:
+        path: "/home/{{ deploy_user }}/.ssh"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0700'
+        state: directory
+
+    - name: Add deploy user SSH key
+      ansible.builtin.authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ lookup('env', 'DEPLOY_USER_SSH_KEY') }}"
+      when: lookup('env', 'DEPLOY_USER_SSH_KEY') | length > 0
+
+    - name: Harden SSH daemon
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?{{ item.key }}\\s+"
+        line: "{{ item.key }} {{ item.value }}"
+        create: true
+        mode: '0644'
+      loop:
+        - { key: 'PermitRootLogin', value: 'no' }
+        - { key: 'PasswordAuthentication', value: 'no' }
+        - { key: 'PermitEmptyPasswords', value: 'no' }
+        - { key: 'MaxAuthTries', value: '3' }
+      notify: Restart ssh
+
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        owner: root
+        group: root
+        mode: '0755'
+        state: directory
+
+    - name: Add Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ docker_apt_arch }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Configure Docker log rotation
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "{{ docker_log_max_size }}",
+              "max-file": "{{ docker_log_max_file }}"
+            }
+          }
+      notify: Restart docker
+
+    - name: Start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Install Bun
+      ansible.builtin.shell:
+        cmd: "curl -fsSL https://bun.sh/install | bash"
+        creates: "{{ bun_install_dir }}/bin/bun"
+      environment:
+        BUN_INSTALL: "{{ bun_install_dir }}"
+      when: install_bun | bool
+
+    - name: Link Bun into PATH
+      ansible.builtin.file:
+        src: "{{ bun_install_dir }}/bin/bun"
+        dest: /usr/local/bin/bun
+        state: link
+      when: install_bun | bool
+
+    - name: Add deploy user to docker group
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        groups: docker
+        append: true
+
+    - name: Create app root
+      ansible.builtin.file:
+        path: "{{ app_root }}"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+        state: directory
+
+    - name: Allow deploy user to clean up old deployment directory
+      ansible.builtin.copy:
+        content: |
+          # Deploy cleanup - allows automation to remove only the previous release directory.
+          {{ deploy_user }} ALL=(root) NOPASSWD: /bin/rm -rf {{ app_old_root }}
+        dest: "/etc/sudoers.d/{{ sudoers_file_name }}"
+        owner: root
+        group: root
+        mode: '0440'
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Install admin seed helper
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/{{ seed_helper_name }}"
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          : "${ADMIN_EMAIL:?ADMIN_EMAIL is required}"
+          : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
+
+          cd {{ app_root }}
+          docker compose exec -T \
+            -e ADMIN_EMAIL="${ADMIN_EMAIL}" \
+            -e ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+            {{ seed_compose_service }} \
+            node {{ seed_node_script }}
+      when: install_seed_helper | bool
+
+    - name: Install public routing packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+        update_cache: true
+      when: configure_public_routing | bool
+
+    - name: Check TLS certificate
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ web_domain }}/fullchain.pem"
+      register: tls_certificate
+      when: configure_public_routing | bool
+
+    - name: Configure nginx reverse proxy
+      ansible.builtin.copy:
+        dest: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          {% if tls_certificate.stat.exists | default(false) %}
+          server {
+              listen 80;
+              server_name {{ web_domain }} {{ api_domain }};
+
+              location / {
+                  return 301 https://$host$request_uri;
+              }
+          }
+
+          server {
+              listen 443 ssl http2;
+              server_name {{ web_domain }};
+
+              ssl_certificate /etc/letsencrypt/live/{{ web_domain }}/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/{{ web_domain }}/privkey.pem;
+
+              location / {
+                  proxy_pass {{ web_upstream_url }};
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+          }
+
+          server {
+              listen 443 ssl http2;
+              server_name {{ api_domain }};
+
+              ssl_certificate /etc/letsencrypt/live/{{ web_domain }}/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/{{ web_domain }}/privkey.pem;
+
+              location / {
+                  proxy_pass {{ api_upstream_url }};
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+          }
+          {% else %}
+          server {
+              listen 80;
+              server_name {{ web_domain }};
+
+              location / {
+                  proxy_pass {{ web_upstream_url }};
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+          }
+
+          server {
+              listen 80;
+              server_name {{ api_domain }};
+
+              location / {
+                  proxy_pass {{ api_upstream_url }};
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+              }
+          }
+          {% endif %}
+      when: configure_public_routing | bool
+      notify: Reload nginx
+
+    - name: Enable nginx reverse proxy site
+      ansible.builtin.file:
+        src: "/etc/nginx/sites-available/{{ nginx_site_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ nginx_site_name }}"
+        state: link
+      when: configure_public_routing | bool
+      notify: Reload nginx
+
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      when: configure_public_routing | bool
+      notify: Reload nginx
+
+    - name: Validate nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      when: configure_public_routing | bool
+
+    - name: Start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+      when: configure_public_routing | bool
+
+    - name: Issue TLS certificates
+      ansible.builtin.command:
+        cmd: >-
+          certbot --nginx --non-interactive --agree-tos
+          --email {{ acme_email }}
+          -d {{ web_domain }}
+          -d {{ api_domain }}
+        creates: "/etc/letsencrypt/live/{{ web_domain }}/fullchain.pem"
+      when:
+        - configure_public_routing | bool
+        - acme_email | length > 0
+
+  handlers:
+    - name: Restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+    - name: Restart ssh
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
