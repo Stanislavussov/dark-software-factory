@@ -65,24 +65,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install SSH key
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
-          ssh-keyscan -p "${VPS_SSH_PORT}" "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+      - name: Prepare VPS directories
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          port: ${{ env.VPS_SSH_PORT }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p '${{ env.VPS_APP_ROOT }}/nanoclaw/workspace' '${{ env.VPS_APP_ROOT }}/nanoclaw/logs' '${{ env.VPS_APP_ROOT }}/nanoclaw/data'
 
       - name: Upload compose bundle
-        run: |
-          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "mkdir -p '${VPS_APP_ROOT}/nanoclaw/workspace' '${VPS_APP_ROOT}/nanoclaw/logs' '${VPS_APP_ROOT}/nanoclaw/data'"
-          scp -i ~/.ssh/deploy_key -P "${VPS_SSH_PORT}" deploy/nanoclaw/compose.yml \
-            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${VPS_APP_ROOT}/nanoclaw/compose.yml"
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          port: ${{ env.VPS_SSH_PORT }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: "deploy/nanoclaw/compose.yml"
+          target: "${{ env.VPS_APP_ROOT }}/nanoclaw"
+          strip_components: 2
+          overwrite: true
 
       - name: Write server env
         run: |
-          cat > nanoclaw.env <<'EOF'
+          cat > .env <<'EOF'
           NANOCLAW_IMAGE=${{ needs.build.outputs.image }}
           OC_GO_CC_IMAGE=${{ vars.OC_GO_CC_IMAGE || 'samueltuyizere/oc-go-cc:latest' }}
           OC_GO_CC_PORT=${{ vars.OC_GO_CC_PORT || '3456' }}
@@ -112,22 +119,31 @@ jobs:
           VERIFY_DEPS=${{ vars.VERIFY_DEPS || 'pnpm lint:deps' }}
           VERIFY_TEST=${{ vars.VERIFY_TEST || 'pnpm test' }}
           EOF
-          chmod 600 nanoclaw.env
-          scp -i ~/.ssh/deploy_key -P "${VPS_SSH_PORT}" nanoclaw.env \
-            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${VPS_APP_ROOT}/nanoclaw/.env"
-          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "chmod 600 '${VPS_APP_ROOT}/nanoclaw/.env'"
+          chmod 600 .env
 
-      - name: Log in to GHCR on VPS
-        env:
-          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-        run: |
-          if [ -n "${GHCR_READ_TOKEN}" ]; then
-            printf '%s' "${GHCR_READ_TOKEN}" | ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              "docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin"
-          fi
+      - name: Upload server env
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          port: ${{ env.VPS_SSH_PORT }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          source: ".env"
+          target: "${{ env.VPS_APP_ROOT }}/nanoclaw"
+          overwrite: true
 
       - name: Pull and restart
-        run: |
-          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "cd '${VPS_APP_ROOT}/nanoclaw' && docker compose pull && docker compose up -d --remove-orphans"
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          port: ${{ env.VPS_SSH_PORT }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          script: |
+            cd '${{ env.VPS_APP_ROOT }}/nanoclaw'
+            chmod 600 .env
+            if [ -n '${{ secrets.GHCR_READ_TOKEN }}' ]; then
+              echo '${{ secrets.GHCR_READ_TOKEN }}' | docker login ghcr.io -u '${{ env.GHCR_USERNAME }}' --password-stdin
+            fi
+            docker compose pull
+            docker compose up -d --remove-orphans
