@@ -35,8 +35,10 @@ Create these GitHub Actions variables:
 - `GHCR_USERNAME`, optional, defaults to the workflow actor
 - `OPENCODE_INSTALL_URL`, set to `https://opencode.ai/install`
 - `VPS_APP_ROOT`, optional, defaults to `/opt/dark-software-factory`
-- `OC_GO_CC_IMAGE`, optional, defaults to `samueltuyizere/oc-go-cc:latest`
+- `COMPOSE_PROFILES`, optional; set to `oc-go-cc` only when using a valid OpenCode proxy image
+- `OC_GO_CC_IMAGE`, optional, used only with `COMPOSE_PROFILES=oc-go-cc`
 - `OC_GO_CC_PORT`, optional, defaults to `3456`
+- `OPENCODE_GO_API_BASE`, optional; set to `http://oc-go-cc:3456/v1` only when using the proxy sidecar
 - `TARGET_REPO`, optional, defaults to `https://github.com/Stanislavussov/Polyglot`
 - `TARGET_BRANCH`, optional, defaults to `master`
 - `MAX_FIX_ATTEMPTS`, optional, defaults to `3`
@@ -74,6 +76,8 @@ The workflow:
 - uploads `deploy/nanoclaw/compose.yml` to the VPS;
 - writes the server-side `.env` from GitHub secrets;
 - runs `docker compose pull && docker compose up -d --remove-orphans`.
+
+The `oc-go-cc` sidecar is disabled by default because the previous public Docker Hub image is not reliable. To use a proxy sidecar, provide a reachable `OC_GO_CC_IMAGE`, set `COMPOSE_PROFILES=oc-go-cc`, and set `OPENCODE_GO_API_BASE=http://oc-go-cc:3456/v1`.
 
 ## Runtime Contract
 
@@ -117,7 +121,6 @@ docker build -f docker/nanoclaw/Dockerfile -t nanoclaw-lite:test .
 docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e OPENCODE_API_KEY=test \
-  -e OPENCODE_GO_API_BASE=http://127.0.0.1:3456/v1 \
   -e TARGET_REPO=https://github.com/Stanislavussov/Polyglot \
   -e TARGET_BRANCH=master \
   -e TARGET_GITHUB_TOKEN=test \
@@ -136,7 +139,7 @@ SSH into the VPS as the deploy user:
 cd /opt/dark-software-factory/nanoclaw
 docker compose ps
 docker compose logs --tail=100 nanoclaw
-docker compose logs --tail=100 oc-go-cc
+docker compose --profile oc-go-cc logs --tail=100 oc-go-cc
 docker compose pull
 docker compose up -d --remove-orphans
 ```
@@ -145,5 +148,5 @@ docker compose up -d --remove-orphans
 
 - Keep `.env` only on the VPS. Do not commit it.
 - The `nanoclaw-lite` container mounts `/var/run/docker.sock` so it can run Docker-based verification. Treat the container as highly privileged.
-- Keep the proxy bound to `127.0.0.1` unless there is a specific reason to expose it publicly.
+- Keep the proxy sidecar disabled unless you have a trusted image and need a custom OpenCode API base.
 - Use only test/dev Polyglot environment values in `POLYGLOT_ENV_B64`.

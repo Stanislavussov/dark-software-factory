@@ -3,7 +3,6 @@ set -euo pipefail
 
 required_vars=(
   OPENCODE_API_KEY
-  OPENCODE_GO_API_BASE
   TARGET_BRANCH
   TARGET_GITHUB_TOKEN
   TARGET_REPO

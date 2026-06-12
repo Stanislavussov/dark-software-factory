@@ -7,7 +7,6 @@ const REQUIRED = [
   "TARGET_BRANCH",
   "TARGET_GITHUB_TOKEN",
   "OPENCODE_API_KEY",
-  "OPENCODE_GO_API_BASE",
 ];
 
 const DEFAULTS = {
@@ -25,6 +24,7 @@ const DEFAULTS = {
   TOOLING_COMPOSE_FILE: "deploy/nanoclaw-tooling/compose.yml",
   TOOLING_SERVICE: "polyglot-tooling",
   OPENCODE_COMMAND: "opencode",
+  OPENCODE_GO_API_BASE: "",
   OPENCODE_RUN_ARGS: "",
   OPENCODE_REVIEW_ARGS: "",
   VERIFY_INSTALL: "pnpm install --frozen-lockfile",
@@ -75,7 +75,7 @@ export function loadConfig(env: Env): RuntimeConfig {
     targetBranch: requiredValue("TARGET_BRANCH"),
     targetGithubToken: requiredValue("TARGET_GITHUB_TOKEN"),
     opencodeApiKey: requiredValue("OPENCODE_API_KEY"),
-    opencodeGoApiBase: requiredValue("OPENCODE_GO_API_BASE"),
+    opencodeGoApiBase: value("OPENCODE_GO_API_BASE"),
     polyglotEnvB64: env.POLYGLOT_ENV_B64 || "",
     maxFixAttempts: numberValue("MAX_FIX_ATTEMPTS"),
     logTailLines: numberValue("LOG_TAIL_LINES"),

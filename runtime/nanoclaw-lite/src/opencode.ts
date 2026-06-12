@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ProcessResult, runProcess } from "./process.js";
-import type { ChildHandler, LoggerLike, ReviewFinding, ReviewResult, RuntimeConfig } from "./types.js";
+import type { ChildHandler, Env, LoggerLike, ReviewFinding, ReviewResult, RuntimeConfig } from "./types.js";
 
 const BEGIN = "NANOCLAW_REVIEW_RESULT_BEGIN";
 const END = "NANOCLAW_REVIEW_RESULT_END";
@@ -68,12 +68,21 @@ export class OpenCodeRunner {
       timeoutMs,
       logger: this.logger,
       allowCancel: this.onChild,
-      env: {
-        ...this.config.baseEnv,
-        OPENCODE_API_KEY: this.config.opencodeApiKey,
-        OPENCODE_GO_API_BASE: this.config.opencodeGoApiBase,
-      },
+      env: this.opencodeEnv(),
     });
+  }
+
+  opencodeEnv() {
+    const env: Env = {
+      ...this.config.baseEnv,
+      OPENCODE_API_KEY: this.config.opencodeApiKey,
+    };
+    if (this.config.opencodeGoApiBase) {
+      env.OPENCODE_GO_API_BASE = this.config.opencodeGoApiBase;
+    } else {
+      delete env.OPENCODE_GO_API_BASE;
+    }
+    return env;
   }
 
   async readSuperpowers(): Promise<string> {

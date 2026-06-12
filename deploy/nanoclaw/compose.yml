@@ -1,5 +1,7 @@
 services:
   oc-go-cc:
+    profiles:
+      - oc-go-cc
     image: ${OC_GO_CC_IMAGE:-samueltuyizere/oc-go-cc:latest}
     restart: unless-stopped
     env_file:
@@ -15,13 +17,11 @@ services:
   nanoclaw:
     image: ${NANOCLAW_IMAGE:?NANOCLAW_IMAGE is required}
     restart: unless-stopped
-    depends_on:
-      - oc-go-cc
     env_file:
       - path: .env
         required: false
     environment:
-      OPENCODE_GO_API_BASE: http://oc-go-cc:${OC_GO_CC_PORT:-3456}/v1
+      OPENCODE_GO_API_BASE: ${OPENCODE_GO_API_BASE:-}
       NANOCLAW_SKILLS_DIR: /opt/nanoclaw/superpowers
       TARGET_REPO: ${TARGET_REPO:-https://github.com/Stanislavussov/Polyglot}
       TARGET_BRANCH: ${TARGET_BRANCH:-master}

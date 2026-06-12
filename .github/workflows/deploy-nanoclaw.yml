@@ -91,8 +91,10 @@ jobs:
         run: |
           cat > .env <<'EOF'
           NANOCLAW_IMAGE=${{ needs.build.outputs.image }}
+          COMPOSE_PROFILES=${{ vars.COMPOSE_PROFILES }}
           OC_GO_CC_IMAGE=${{ vars.OC_GO_CC_IMAGE || 'samueltuyizere/oc-go-cc:latest' }}
           OC_GO_CC_PORT=${{ vars.OC_GO_CC_PORT || '3456' }}
+          OPENCODE_GO_API_BASE=${{ vars.OPENCODE_GO_API_BASE }}
           OC_GO_CC_API_KEY=${{ secrets.OC_GO_CC_API_KEY }}
           OPENCODE_API_KEY=${{ secrets.OPENCODE_API_KEY }}
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
