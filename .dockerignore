@@ -1,0 +1,7 @@
+.git
+.github
+ansible/.generated
+nanoclaw-v2
+**/.DS_Store
+**/.env
+**/*.log

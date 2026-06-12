@@ -1,0 +1,55 @@
+services:
+  oc-go-cc:
+    image: ${OC_GO_CC_IMAGE:-samueltuyizere/oc-go-cc:latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: ${OC_GO_CC_PORT:-3456}
+    ports:
+      - "127.0.0.1:${OC_GO_CC_PORT:-3456}:${OC_GO_CC_PORT:-3456}"
+    networks:
+      - factory
+
+  nanoclaw:
+    image: ${NANOCLAW_IMAGE:?NANOCLAW_IMAGE is required}
+    restart: unless-stopped
+    depends_on:
+      - oc-go-cc
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OPENCODE_GO_API_BASE: http://oc-go-cc:${OC_GO_CC_PORT:-3456}/v1
+      NANOCLAW_SKILLS_DIR: /opt/nanoclaw/superpowers
+      TARGET_REPO: ${TARGET_REPO:-https://github.com/Stanislavussov/Polyglot}
+      TARGET_BRANCH: ${TARGET_BRANCH:-master}
+      MAX_FIX_ATTEMPTS: ${MAX_FIX_ATTEMPTS:-3}
+      LOG_TAIL_LINES: ${LOG_TAIL_LINES:-80}
+      CANCEL_GRACE_MS: ${CANCEL_GRACE_MS:-10000}
+      GIT_TIMEOUT_MS: ${GIT_TIMEOUT_MS:-120000}
+      OPENCODE_TIMEOUT_MS: ${OPENCODE_TIMEOUT_MS:-3600000}
+      REVIEW_TIMEOUT_MS: ${REVIEW_TIMEOUT_MS:-1800000}
+      GATE_TIMEOUT_MS: ${GATE_TIMEOUT_MS:-1200000}
+      OPENCODE_COMMAND: ${OPENCODE_COMMAND:-opencode}
+      OPENCODE_RUN_ARGS: ${OPENCODE_RUN_ARGS:-}
+      OPENCODE_REVIEW_ARGS: ${OPENCODE_REVIEW_ARGS:-}
+      VERIFY_INSTALL: ${VERIFY_INSTALL:-pnpm install --frozen-lockfile}
+      VERIFY_BUILD: ${VERIFY_BUILD:-pnpm build}
+      VERIFY_LINT: ${VERIFY_LINT:-pnpm lint}
+      VERIFY_DEPS: ${VERIFY_DEPS:-pnpm lint:deps}
+      VERIFY_TEST: ${VERIFY_TEST:-pnpm test}
+      TOOLING_COMPOSE_FILE: ${TOOLING_COMPOSE_FILE:-deploy/nanoclaw-tooling/compose.yml}
+      TOOLING_SERVICE: ${TOOLING_SERVICE:-polyglot-tooling}
+    volumes:
+      - ./workspace:/workspace
+      - ./logs:/logs
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - factory
+
+networks:
+  factory:
+    name: dark-factory

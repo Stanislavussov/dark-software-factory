@@ -1,0 +1,132 @@
+name: Deploy Nanoclaw
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/deploy-nanoclaw.yml
+      - docker/nanoclaw/**
+      - deploy/nanoclaw/**
+      - runtime/nanoclaw-lite/**
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/nanoclaw
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: meta
+        run: |
+          image_name="$(printf '%s' "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${REGISTRY}/${image_name}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "latest=${REGISTRY}/${image_name}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/nanoclaw/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ steps.meta.outputs.latest }}
+          build-args: |
+            OPENCODE_INSTALL_URL=${{ vars.OPENCODE_INSTALL_URL || 'https://opencode.ai/install' }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GHCR_USERNAME: ${{ vars.GHCR_USERNAME || github.actor }}
+      VPS_APP_ROOT: ${{ vars.VPS_APP_ROOT || '/opt/dark-software-factory' }}
+      VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s' "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${VPS_SSH_PORT}" "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload compose bundle
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "mkdir -p '${VPS_APP_ROOT}/nanoclaw/workspace' '${VPS_APP_ROOT}/nanoclaw/logs' '${VPS_APP_ROOT}/nanoclaw/data'"
+          scp -i ~/.ssh/deploy_key -P "${VPS_SSH_PORT}" deploy/nanoclaw/compose.yml \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${VPS_APP_ROOT}/nanoclaw/compose.yml"
+
+      - name: Write server env
+        run: |
+          cat > nanoclaw.env <<'EOF'
+          NANOCLAW_IMAGE=${{ needs.build.outputs.image }}
+          OC_GO_CC_IMAGE=${{ vars.OC_GO_CC_IMAGE || 'samueltuyizere/oc-go-cc:latest' }}
+          OC_GO_CC_PORT=${{ vars.OC_GO_CC_PORT || '3456' }}
+          OC_GO_CC_API_KEY=${{ secrets.OC_GO_CC_API_KEY }}
+          OPENCODE_API_KEY=${{ secrets.OPENCODE_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_CHAT_ID=${{ secrets.TELEGRAM_ALLOWED_CHAT_ID }}
+          TARGET_REPO=${{ vars.TARGET_REPO || 'https://github.com/Stanislavussov/Polyglot' }}
+          TARGET_BRANCH=${{ vars.TARGET_BRANCH || 'master' }}
+          TARGET_GITHUB_TOKEN=${{ secrets.TARGET_GITHUB_TOKEN }}
+          POLYGLOT_ENV_B64=${{ secrets.POLYGLOT_ENV_B64 }}
+          MAX_FIX_ATTEMPTS=${{ vars.MAX_FIX_ATTEMPTS || '3' }}
+          LOG_TAIL_LINES=${{ vars.LOG_TAIL_LINES || '80' }}
+          CANCEL_GRACE_MS=${{ vars.CANCEL_GRACE_MS || '10000' }}
+          GIT_TIMEOUT_MS=${{ vars.GIT_TIMEOUT_MS || '120000' }}
+          OPENCODE_TIMEOUT_MS=${{ vars.OPENCODE_TIMEOUT_MS || '3600000' }}
+          REVIEW_TIMEOUT_MS=${{ vars.REVIEW_TIMEOUT_MS || '1800000' }}
+          GATE_TIMEOUT_MS=${{ vars.GATE_TIMEOUT_MS || '1200000' }}
+          OPENCODE_COMMAND=${{ vars.OPENCODE_COMMAND || 'opencode' }}
+          OPENCODE_RUN_ARGS=${{ vars.OPENCODE_RUN_ARGS }}
+          OPENCODE_REVIEW_ARGS=${{ vars.OPENCODE_REVIEW_ARGS }}
+          TOOLING_COMPOSE_FILE=${{ vars.TOOLING_COMPOSE_FILE || 'deploy/nanoclaw-tooling/compose.yml' }}
+          TOOLING_SERVICE=${{ vars.TOOLING_SERVICE || 'polyglot-tooling' }}
+          VERIFY_INSTALL=${{ vars.VERIFY_INSTALL || 'pnpm install --frozen-lockfile' }}
+          VERIFY_BUILD=${{ vars.VERIFY_BUILD || 'pnpm build' }}
+          VERIFY_LINT=${{ vars.VERIFY_LINT || 'pnpm lint' }}
+          VERIFY_DEPS=${{ vars.VERIFY_DEPS || 'pnpm lint:deps' }}
+          VERIFY_TEST=${{ vars.VERIFY_TEST || 'pnpm test' }}
+          EOF
+          chmod 600 nanoclaw.env
+          scp -i ~/.ssh/deploy_key -P "${VPS_SSH_PORT}" nanoclaw.env \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${VPS_APP_ROOT}/nanoclaw/.env"
+          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "chmod 600 '${VPS_APP_ROOT}/nanoclaw/.env'"
+
+      - name: Log in to GHCR on VPS
+        env:
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          if [ -n "${GHCR_READ_TOKEN}" ]; then
+            printf '%s' "${GHCR_READ_TOKEN}" | ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              "docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin"
+          fi
+
+      - name: Pull and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${VPS_SSH_PORT}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "cd '${VPS_APP_ROOT}/nanoclaw' && docker compose pull && docker compose up -d --remove-orphans"

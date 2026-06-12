@@ -1,0 +1,24 @@
+{
+  "name": "nanoclaw-lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "nanoclaw-lite": "dist/index.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "pnpm typecheck && pnpm biome:check && pnpm build",
+    "typecheck": "tsc --noEmit",
+    "biome:check": "biome check ."
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,81 @@
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import type { Env, LoggerLike } from "./types.js";
+
+export type ProcessResult = {
+  code: number;
+  signal?: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+};
+
+export type ProcessOptions = {
+  command: string;
+  args?: string[];
+  cwd: string;
+  input?: string;
+  timeoutMs: number;
+  env?: Env;
+  logger?: LoggerLike;
+  allowCancel?: (child: ChildProcessWithoutNullStreams) => void;
+};
+
+export function runProcess({
+  command,
+  args = [],
+  cwd,
+  input = "",
+  timeoutMs,
+  env = {},
+  logger,
+  allowCancel,
+}: ProcessOptions): Promise<ProcessResult> {
+  return new Promise<ProcessResult>((resolve) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            child.kill("SIGTERM");
+            setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+          }, timeoutMs)
+        : null;
+
+    if (allowCancel) allowCancel(child);
+    child.stdin.end(input);
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      logger?.info("subprocess.stdout", { command, text: text.trimEnd() });
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      logger?.info("subprocess.stderr", { command, text: text.trimEnd() });
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code: 127, stdout, stderr: `${stderr}\n${error.message}`.trim() });
+    });
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code: code ?? 1, signal, stdout, stderr });
+    });
+  });
+}
+
+export function shell(
+  command: string,
+  options: Omit<ProcessOptions, "command" | "args" | "input">,
+): Promise<ProcessResult> {
+  return runProcess({ command: "sh", args: ["-lc", command], ...options });
+}

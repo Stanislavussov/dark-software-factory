@@ -1,0 +1,7 @@
+nanoclaw-v2/
+.pnpm-store/
+runtime/nanoclaw-lite/dist/
+runtime/nanoclaw-lite/node_modules/
+deploy/nanoclaw/data/
+deploy/nanoclaw/logs/
+deploy/nanoclaw/workspace/

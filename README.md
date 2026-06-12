@@ -39,3 +39,14 @@ This repository captures the language, tasks, and implementation path for buildi
 ## What Comes Next
 
 The next step is to turn the concept into concrete factory services: intent capture, task decomposition, verification, audit trails, and controlled deployment loops.
+
+## Current Infrastructure
+
+- `ansible/` provisions the VPS Foundation: SSH hardening, firewall, fail2ban, Docker, deploy user, app root, optional public routing, and log rotation.
+- `docker/nanoclaw/` defines the `nanoclaw-lite` runtime image. It installs OpenCode and copies the local purpose-built runtime.
+- `deploy/nanoclaw/` contains the production Compose bundle and environment example for the VPS.
+- `.github/workflows/deploy-nanoclaw.yml` builds the image, pushes it to GHCR, uploads the Compose bundle, writes the server `.env`, and restarts the service.
+
+See `docs/runbooks/nanoclaw-docker-deployment.md` for the deployment steps and required GitHub configuration.
+
+The `nanoclaw-lite` runtime is Telegram-only: `/run` accepts free-form prompts from one allowlisted chat id, works on autonomous branches against `Stanislavussov/Polyglot`, runs Polyglot gates through a separate tooling container, runs report-only code review, commits locally only after clean verification, and pushes only the autonomous branch to GitHub after an explicit `/push`. GitHub merge remains manual.
