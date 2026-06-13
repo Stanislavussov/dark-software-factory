@@ -64,7 +64,7 @@ export class OpenCodeRunner {
     const promptPath = await this.writePromptFile(prompt);
     return runProcess({
       command: this.config.opencodeCommand,
-      args: [...args, "--file", promptPath, "Use the attached prompt file as your complete instructions."],
+      args: [...args, "Use the attached prompt file as your complete instructions.", `--file=${promptPath}`],
       cwd: this.config.targetRepoDir,
       timeoutMs,
       logger: this.logger,

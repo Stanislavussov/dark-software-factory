@@ -249,17 +249,18 @@ export class Orchestrator {
   async discard(bot: TelegramSender, chatId: string, text: string): Promise<unknown> {
     const task = await this.store.activeTask();
     if (!task || !["failed", "ready_for_push"].includes(task.status)) return bot.send(chatId, "No discardable task.");
-    if (text.trim() !== "confirm") {
+    const wantsConfirm = text.trim() === "confirm" || this.discardRequestedFor === task.id;
+    if (!wantsConfirm) {
       this.discardRequestedFor = task.id;
-      return bot.send(chatId, `Send /discard confirm to delete local work for ${task.id}.`);
+      return bot.send(chatId, `Send /discard again or /discard confirm to delete local work for ${task.id}.`);
     }
-    if (this.discardRequestedFor !== task.id) return bot.send(chatId, "Send /discard first, then /discard confirm.");
     const git = new GitClient(this.config, this.logger.withFile(task.logPath));
     await git.discardBranch(task.branch);
     task.status = "discarded";
     task.updatedAt = now();
     await this.store.writeTask(task);
     await this.store.clearActiveTask();
+    this.discardRequestedFor = null;
     return bot.send(chatId, `Discarded ${task.id}.`);
   }
 
