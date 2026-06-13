@@ -49,8 +49,8 @@ Create these GitHub Actions variables:
 - `REVIEW_TIMEOUT_MS`, optional, defaults to `1800000`
 - `GATE_TIMEOUT_MS`, optional, defaults to `1200000`
 - `OPENCODE_COMMAND`, optional, defaults to `opencode`
-- `OPENCODE_RUN_ARGS`, optional
-- `OPENCODE_REVIEW_ARGS`, optional
+- `OPENCODE_RUN_ARGS`, optional, defaults to `run --dangerously-skip-permissions`
+- `OPENCODE_REVIEW_ARGS`, optional, defaults to `run`
 - `TOOLING_COMPOSE_FILE`, optional, defaults to `deploy/nanoclaw-tooling/compose.yml`
 - `TOOLING_SERVICE`, optional, defaults to `polyglot-tooling`
 

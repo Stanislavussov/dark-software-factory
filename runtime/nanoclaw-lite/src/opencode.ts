@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ProcessResult, runProcess } from "./process.js";
 import type { ChildHandler, Env, LoggerLike, ReviewFinding, ReviewResult, RuntimeConfig } from "./types.js";
@@ -60,16 +61,24 @@ export class OpenCodeRunner {
   }
 
   async run(args: string[], prompt: string, timeoutMs: number): Promise<ProcessResult> {
+    const promptPath = await this.writePromptFile(prompt);
     return runProcess({
       command: this.config.opencodeCommand,
-      args,
+      args: [...args, "--file", promptPath, "Use the attached prompt file as your complete instructions."],
       cwd: this.config.targetRepoDir,
-      input: prompt,
       timeoutMs,
       logger: this.logger,
       allowCancel: this.onChild,
       env: this.opencodeEnv(),
     });
+  }
+
+  async writePromptFile(prompt: string): Promise<string> {
+    const dir = join(this.config.dataDir, "opencode-prompts");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${Date.now()}-${randomUUID()}.md`);
+    await writeFile(path, prompt, { mode: 0o600 });
+    return path;
   }
 
   opencodeEnv() {

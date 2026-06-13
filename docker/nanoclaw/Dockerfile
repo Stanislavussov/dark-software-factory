@@ -4,6 +4,7 @@ ARG OPENCODE_INSTALL_URL="https://opencode.ai/install"
 ARG PNPM_VERSION="10.33.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV CI=true
 ENV PNPM_HOME="/pnpm"
 ENV PATH="/root/.opencode/bin:/opt/opencode/bin:${PNPM_HOME}:${PATH}"
 
