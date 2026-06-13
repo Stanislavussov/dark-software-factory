@@ -73,6 +73,20 @@ export class GitClient {
     return result.stdout.trim();
   }
 
+  async currentBranch(): Promise<string> {
+    const result = await this.git("branch --show-current", this.config.targetRepoDir, true);
+    return result.stdout.trim();
+  }
+
+  async repoExists(): Promise<boolean> {
+    const result = await shell("test -d .git", {
+      cwd: this.config.targetRepoDir,
+      timeoutMs: 10000,
+      logger: this.logger,
+    });
+    return result.code === 0;
+  }
+
   async changedFiles(): Promise<string[]> {
     const base = `origin/${quote(this.config.targetBranch)}`;
     const committed = await this.git(`diff --name-only ${base}...HEAD`, this.config.targetRepoDir, true);

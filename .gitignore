@@ -5,3 +5,4 @@ runtime/nanoclaw-lite/node_modules/
 deploy/nanoclaw/data/
 deploy/nanoclaw/logs/
 deploy/nanoclaw/workspace/
+.omo/

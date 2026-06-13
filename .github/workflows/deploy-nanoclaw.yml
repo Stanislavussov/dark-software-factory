@@ -102,6 +102,7 @@ jobs:
           TARGET_REPO=${{ vars.TARGET_REPO || 'https://github.com/Stanislavussov/Polyglot' }}
           TARGET_BRANCH=${{ vars.TARGET_BRANCH || 'master' }}
           TARGET_GITHUB_TOKEN=${{ secrets.TARGET_GITHUB_TOKEN }}
+          NANOCLAW_WORKSPACE_HOST_DIR=${{ env.VPS_APP_ROOT }}/nanoclaw/workspace
           POLYGLOT_ENV_B64=${{ secrets.POLYGLOT_ENV_B64 }}
           MAX_FIX_ATTEMPTS=${{ vars.MAX_FIX_ATTEMPTS || '3' }}
           LOG_TAIL_LINES=${{ vars.LOG_TAIL_LINES || '80' }}

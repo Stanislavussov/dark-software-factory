@@ -5,6 +5,7 @@ import type { Env, LoggerLike } from "./types.js";
 export type ProcessResult = {
   code: number;
   signal?: NodeJS.Signals | null;
+  timedOut?: boolean;
   stdout: string;
   stderr: string;
 };
@@ -39,9 +40,11 @@ export function runProcess({
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
     const timer =
       timeoutMs > 0
         ? setTimeout(() => {
+            timedOut = true;
             child.kill("SIGTERM");
             setTimeout(() => child.kill("SIGKILL"), 5000).unref();
           }, timeoutMs)
@@ -63,13 +66,13 @@ export function runProcess({
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ code: 127, stdout, stderr: `${stderr}\n${error.message}`.trim() });
+      resolve({ code: 127, timedOut, stdout, stderr: `${stderr}\n${error.message}`.trim() });
     });
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ code: code ?? 1, signal, stdout, stderr });
+      resolve({ code: code ?? 1, signal, timedOut, stdout, stderr });
     });
   });
 }

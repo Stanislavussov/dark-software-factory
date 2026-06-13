@@ -74,7 +74,19 @@ export class TelegramBot {
   async send(chatId: string, text: string): Promise<void> {
     const chunks = chunk(text, 3800);
     for (const part of chunks) {
-      await this.api("sendMessage", { chat_id: chatId, text: part, disable_web_page_preview: true });
+      await this.sendChunk(chatId, part);
+    }
+  }
+
+  async sendChunk(chatId: string, text: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.api("sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
+        return;
+      } catch (error) {
+        await this.logger.error("telegram.send_error", { attempt: attempt + 1, error: errorMessage(error) });
+        if (attempt < 2) await delay(250 * 2 ** attempt);
+      }
     }
   }
 

@@ -29,6 +29,7 @@ async function main(): Promise<void> {
   const orchestrator = new Orchestrator(config, store, logger);
   let bot: TelegramBot;
   bot = new TelegramBot(config, logger, (message) => orchestrator.handle(bot, message));
+  await orchestrator.recoverOnStartup(bot, config.telegramAllowedChatId);
 
   process.on("SIGTERM", () => bot.stop());
   process.on("SIGINT", () => bot.stop());

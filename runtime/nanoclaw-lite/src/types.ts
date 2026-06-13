@@ -64,11 +64,33 @@ export type ReviewResult = {
   findings: ReviewFinding[];
 };
 
+export type FailureType =
+  | "telegram"
+  | "git"
+  | "rebase"
+  | "opencode"
+  | "opencode_timeout"
+  | "gate_app"
+  | "gate_infra"
+  | "review_findings"
+  | "review_contract"
+  | "protected_path"
+  | "cancelled"
+  | "crashed_or_interrupted"
+  | "recovery_lock";
+
 export type FailureSummary = {
-  type: string;
+  type: FailureType | string;
   summary: string;
   code?: number;
+  signal?: string | null;
+  timedOut?: boolean;
   gate?: Gate | null;
+  command?: string;
+  stdoutTail?: string;
+  stderrTail?: string;
+  review?: ReviewResult;
+  rebaseStatus?: string;
 };
 
 export type TaskStatus = "idle" | "running" | "failed" | "ready_for_push" | "pushed" | "discarded" | "archived";

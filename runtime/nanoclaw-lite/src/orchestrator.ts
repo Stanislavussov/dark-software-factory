@@ -1,17 +1,30 @@
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { helpText, resolveCommand, runPromptRejection, unknownTextSuggestion } from "./commands.js";
 import { publicConfigSnapshot } from "./config.js";
 import { classifyGateFailure, GateRunner } from "./gates.js";
 import { compareUrl, GitClient } from "./git.js";
 import { Logger } from "./logger.js";
+import { failureNextActions, OperatorNotifier } from "./notifications.js";
 import { OpenCodeRunner } from "./opencode.js";
 import type { ProcessResult } from "./process.js";
 import { branchNameFor, createTask, now } from "./state.js";
-import type { Gate, LoggerLike, RuntimeConfig, Task, TaskStatus, TelegramCommand, TelegramSender } from "./types.js";
+import type {
+  FailureType,
+  Gate,
+  LoggerLike,
+  RuntimeConfig,
+  Task,
+  TaskStatus,
+  TelegramCommand,
+  TelegramSender,
+} from "./types.js";
 
 type ExecuteTaskOptions = {
   resetBranch: boolean;
   startGateId?: string | null;
+  notifier?: OperatorNotifier;
 };
 
 type LogEvent = {
@@ -39,7 +52,7 @@ export class Orchestrator {
   running: boolean;
   phase: "idle" | "run" | "fix" | "push";
   currentChild: import("node:child_process").ChildProcessWithoutNullStreams | null;
-  discardRequestedFor: string | null;
+  discardConfirmation: { taskId: string; expiresAt: number } | null;
 
   constructor(config: RuntimeConfig, store: import("./state.js").StateStore, logger: LoggerLike) {
     this.config = config;
@@ -48,12 +61,35 @@ export class Orchestrator {
     this.running = false;
     this.phase = "idle";
     this.currentChild = null;
-    this.discardRequestedFor = null;
+    this.discardConfirmation = null;
+  }
+
+  async recoverOnStartup(bot: TelegramSender, chatId: string): Promise<void> {
+    const notifier = new OperatorNotifier(bot, chatId, this.logger);
+    const state = await this.store.readState();
+    const active = state.activeTaskId ? await this.store.readTask(state.activeTaskId).catch(() => null) : null;
+    if (active?.status === "failed" && active.latestFailure?.type === "crashed_or_interrupted") {
+      await new Logger(active.logPath).error("task.failed", active.latestFailure);
+      await notifier.recovery(await this.statusText());
+      return;
+    }
+    if (!active) {
+      const git = new GitClient(this.config, this.logger);
+      const repoExists = await git.repoExists().catch(() => false);
+      const dirty = repoExists ? await git.statusShort().catch(() => "") : "";
+      if (dirty) {
+        state.recoveryLock = `target repo has dirty/untracked files without an active task (${dirty.split(/\r?\n/).length} status lines)`;
+        await this.store.writeState(state);
+      }
+    }
+    await notifier.recovery(await this.statusText());
   }
 
   async handle(bot: TelegramSender, message: TelegramCommand): Promise<unknown> {
+    const intent = resolveCommand(message.command);
+    if (!intent) return bot.send(message.chatId, unknownTextSuggestion(message.rawText));
     try {
-      switch (message.command) {
+      switch (intent.name) {
         case "/help":
           return bot.send(message.chatId, helpText());
         case "/status":
@@ -64,6 +100,12 @@ export class Orchestrator {
           return bot.send(message.chatId, await this.logsText(message.text));
         case "/inspect":
           return bot.send(message.chatId, await this.inspectText());
+        case "/failure":
+          return bot.send(message.chatId, await this.failureText(message.text));
+        case "/review":
+          return bot.send(message.chatId, await this.reviewText(message.text));
+        case "/doctor":
+          return bot.send(message.chatId, await this.doctorText());
         case "/run":
           return this.run(bot, message.chatId, message.text);
         case "/fix":
@@ -77,31 +119,44 @@ export class Orchestrator {
         case "/cancel":
           return this.cancel(bot, message.chatId);
         default:
-          return bot.send(message.chatId, "Unknown command. Send /help.");
+          return bot.send(message.chatId, unknownTextSuggestion(message.rawText));
       }
     } catch (error) {
       const messageText = errorMessage(error);
-      await this.logger.error("command.failed", { command: message.command, error: messageText });
+      await this.logger.error("command.failed", { command: intent.name, error: messageText });
       return bot.send(message.chatId, `Command failed: ${messageText}`);
     }
   }
 
   async run(bot: TelegramSender, chatId: string, prompt: string): Promise<unknown> {
     if (!prompt.trim()) return bot.send(chatId, "Usage: /run <prompt>");
+    const rejected = runPromptRejection(prompt);
+    if (rejected) return bot.send(chatId, rejected);
     if (this.running) return bot.send(chatId, "A task is already running.");
+    const state = await this.store.readState();
+    if (state.recoveryLock)
+      return bot.send(
+        chatId,
+        `Blocked by recovery lock: ${state.recoveryLock}\nNext: /doctor, /inspect, /discard confirm, or /archive`,
+      );
     const active = await this.store.activeTask();
     if (active && active.status !== "pushed")
       return bot.send(chatId, `Blocked by ${active.status} task ${active.id}. Use /status.`);
     this.running = true;
     this.phase = "run";
-    await bot.send(chatId, "Starting task.");
+    const notifier = new OperatorNotifier(bot, chatId, this.logger);
     try {
       const branch = branchNameFor(prompt);
       const logPath = join(this.config.logsDir, "tasks", `${branch.split("/").pop()}.log`);
       const task = createTask({ prompt, branch, configSnapshot: publicConfigSnapshot(this.config), logPath });
       await this.store.setActiveTask(task);
-      await this.executeTask(task, prompt, { resetBranch: true });
-      await bot.send(chatId, await this.statusText());
+      await new Logger(task.logPath).info("task.start", { branch: task.branch });
+      await notifier.taskStarted(task);
+      await this.executeTask(task, prompt, { resetBranch: true, notifier });
+      const updated = await this.store.readTask(task.id);
+      if (updated.status === "ready_for_push") await notifier.ready(updated);
+      else if (updated.status === "failed") await notifier.failed(updated);
+      await notifier.send(await this.statusText());
     } finally {
       this.running = false;
       this.phase = "idle";
@@ -112,23 +167,39 @@ export class Orchestrator {
     if (this.running) return bot.send(chatId, "A task is already running.");
     const task = await this.store.activeTask();
     if (task?.status !== "failed") return bot.send(chatId, "/fix is only available for a failed task.");
+    if (
+      task.latestFailure &&
+      !["gate_app", "review_findings", "cancelled", "rebase"].includes(task.latestFailure.type)
+    ) {
+      return bot.send(
+        chatId,
+        `/fix is not allowed for ${task.latestFailure.type}. Next: ${failureNextActions(task.latestFailure.type)}`,
+      );
+    }
     this.running = true;
     this.phase = "fix";
     task.status = "running";
     task.latestManualFixNote = extra || null;
     task.updatedAt = now();
     await this.store.writeTask(task);
-    await bot.send(chatId, "Retrying failed task.");
+    const notifier = new OperatorNotifier(bot, chatId, this.logger);
+    await notifier.send(`Retrying failed task: ${task.id}`);
     try {
-      const context = [
-        "Fix the current failed task.",
-        task.latestFailure ? JSON.stringify(task.latestFailure) : "",
+      const context = taskEnvelope("fix", task, [
+        "Fix the current failed task using the structured failure context below.",
+        task.latestFailure ? `Failure context:\n${JSON.stringify(task.latestFailure, null, 2)}` : "",
+        task.latestReview ? `Review context:\n${JSON.stringify(task.latestReview, null, 2)}` : "",
         extra ? `Operator instructions: ${extra}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-      await this.executeTask(task, context, { resetBranch: false, startGateId: task.lastFailedGate?.id || null });
-      await bot.send(chatId, await this.statusText());
+      ]);
+      await this.executeTask(task, context, {
+        resetBranch: false,
+        startGateId: task.lastFailedGate?.id || null,
+        notifier,
+      });
+      const updated = await this.store.readTask(task.id);
+      if (updated.status === "ready_for_push") await notifier.ready(updated);
+      else if (updated.status === "failed") await notifier.failed(updated);
+      await notifier.send(await this.statusText());
     } finally {
       this.running = false;
       this.phase = "idle";
@@ -141,34 +212,49 @@ export class Orchestrator {
     if (task?.status !== "ready_for_push") return bot.send(chatId, "/push requires a ready_for_push task.");
     this.running = true;
     this.phase = "push";
+    const notifier = new OperatorNotifier(bot, chatId, this.logger);
     try {
       const taskLogger = this.logger.withFile(task.logPath);
       const git = new GitClient(this.config, taskLogger);
       const gates = new GateRunner(this.config, taskLogger);
       const opencode = new OpenCodeRunner(this.config, taskLogger);
+      await notifier.send(`Push started: ${task.id}\nBranch: ${task.branch}`);
+      await git.ensureRepo({ syncTargetBranch: false });
+      await git.checkoutBranch(task.branch);
       const rebase = await git.rebaseTarget();
       if (rebase.code !== 0) {
         await this.failTask(task, "rebase", "Rebase failed before push.", rebase);
-        return bot.send(chatId, await this.statusText());
+        await notifier.failed(task);
+        return notifier.send(await this.statusText());
       }
       const gateResult = await gates.runFrom();
       if (!gateResult.ok) {
         const classification = classifyGateFailure(gateResult.result);
-        await this.failTask(
-          task,
-          classification.type,
-          classification.type === "infra_gate"
+        const gateType = gateResult.result.timedOut
+          ? "gate_infra"
+          : classification.type === "infra_gate"
+            ? "gate_infra"
+            : "gate_app";
+        const gateSummary = gateResult.result.timedOut
+          ? `Gate ${gateResult.failedGate.id} timed out before push.`
+          : classification.type === "infra_gate"
             ? `Gate ${gateResult.failedGate.id} failed before push due to tooling/runtime infrastructure: ${classification.summary}`
-            : `Gate ${gateResult.failedGate.id} failed before push.`,
-          gateResult.result,
-          gateResult.failedGate,
-        );
-        return bot.send(chatId, await this.statusText());
+            : `Gate ${gateResult.failedGate.id} failed before push.`;
+        await this.failTask(task, gateType, gateSummary, gateResult.result, gateResult.failedGate);
+        await notifier.failed(task);
+        return notifier.send(await this.statusText());
       }
       const review = await opencode.review({ diff: await git.currentDiff() });
       if (review.result.status !== "clean") {
-        await this.failTask(task, "review", review.result.summary, review.raw);
-        return bot.send(chatId, await this.statusText());
+        task.latestReview = review.result;
+        await this.failTask(
+          task,
+          review.raw.timedOut ? "opencode_timeout" : review.ok ? "review_findings" : "review_contract",
+          review.raw.timedOut ? "OpenCode review timed out." : review.result.summary,
+          review.raw,
+        );
+        await notifier.failed(task);
+        return notifier.send(await this.statusText());
       }
       const hash = await git.pushAutonomous(task.branch);
       task.status = "pushed";
@@ -179,7 +265,7 @@ export class Orchestrator {
       await taskLogger.info("task.pushed", { branch: task.branch, commitHash: hash, compareUrl: task.compareUrl });
       await this.store.writeTask(task);
       await this.store.clearActiveTask();
-      return bot.send(chatId, `Pushed ${task.branch}\nCommit: ${hash}\n${task.compareUrl}`);
+      return notifier.pushed(task);
     } finally {
       this.running = false;
       this.phase = "idle";
@@ -191,9 +277,15 @@ export class Orchestrator {
     const git = new GitClient(this.config, taskLogger);
     const gates = new GateRunner(this.config, taskLogger, (child) => {
       this.currentChild = child;
+      child.once("close", () => {
+        if (this.currentChild === child) this.currentChild = null;
+      });
     });
     const opencode = new OpenCodeRunner(this.config, taskLogger, (child) => {
       this.currentChild = child;
+      child.once("close", () => {
+        if (this.currentChild === child) this.currentChild = null;
+      });
     });
     const protectedPathsAllowed = allowsToolingChanges(task.prompt);
     const protectedPathInstruction = protectedPathsAllowed
@@ -203,17 +295,31 @@ export class Orchestrator {
           `Do not edit: ${PROTECTED_PATHS.join(", ")}.`,
         ].join("\n");
     await mkdir(this.config.logsDir, { recursive: true });
+    task.status = "running";
+    task.updatedAt = now();
+    await this.store.writeTask(task);
+    await taskLogger.info("task.phase", { phase: "git.prepare", branch: task.branch });
     await git.ensureRepo({ syncTargetBranch: options.resetBranch });
     if (options.resetBranch) {
       await git.createBranch(task.branch);
+      await taskLogger.info("task.branch_created", { branch: task.branch });
     } else if (task.latestFailure?.type === "rebase") {
       await taskLogger.info("task.fix_rebase_conflict", { branch: task.branch });
     } else {
       await git.checkoutBranch(task.branch);
     }
-    const implementation = await opencode.implement(prompt, protectedPathInstruction);
+    await taskLogger.info("task.phase", { phase: "opencode.implement" });
+    const implementation = await opencode.implement(
+      taskEnvelope(options.resetBranch ? "run" : "fix", task, [prompt]),
+      protectedPathInstruction,
+    );
     if (implementation.code !== 0)
-      return this.failTask(task, "opencode", `OpenCode exited ${implementation.code}.`, implementation);
+      return this.failTask(
+        task,
+        implementation.timedOut ? "opencode_timeout" : "opencode",
+        implementation.timedOut ? "OpenCode timed out." : `OpenCode exited ${implementation.code}.`,
+        implementation,
+      );
     const initialProtectedPaths = protectedPathsAllowed ? [] : protectedChangedFiles(await git.changedFiles());
     if (initialProtectedPaths.length > 0) {
       return this.failTask(
@@ -225,15 +331,32 @@ export class Orchestrator {
     }
     let nextGate = options.startGateId ?? null;
     for (let attempt = 0; attempt <= this.config.maxFixAttempts; attempt += 1) {
+      await taskLogger.info("task.phase", { phase: "gate", startGateId: nextGate });
       const gateResult = await gates.runFrom(nextGate);
       if (gateResult.ok) break;
       task.lastFailedGate = gateResult.failedGate;
       const classification = classifyGateFailure(gateResult.result);
+      const gateType = gateResult.result.timedOut
+        ? "gate_infra"
+        : classification.type === "infra_gate"
+          ? "gate_infra"
+          : "gate_app";
       if (classification.type === "infra_gate") {
         return this.failTask(
           task,
-          "infra_gate",
-          `Gate ${gateResult.failedGate.id} failed due to tooling/runtime infrastructure: ${classification.summary}`,
+          gateType,
+          gateResult.result.timedOut
+            ? `Gate ${gateResult.failedGate.id} timed out.`
+            : `Gate ${gateResult.failedGate.id} failed due to tooling/runtime infrastructure: ${classification.summary}`,
+          gateResult.result,
+          gateResult.failedGate,
+        );
+      }
+      if (gateResult.result.timedOut) {
+        return this.failTask(
+          task,
+          gateType,
+          `Gate ${gateResult.failedGate.id} timed out.`,
           gateResult.result,
           gateResult.failedGate,
         );
@@ -241,7 +364,7 @@ export class Orchestrator {
       if (attempt === this.config.maxFixAttempts) {
         return this.failTask(
           task,
-          "gate",
+          "gate_app",
           `Gate ${gateResult.failedGate.id} failed after ${attempt} fix attempts.`,
           gateResult.result,
           gateResult.failedGate,
@@ -251,6 +374,7 @@ export class Orchestrator {
       const fixPrompt = [
         `Fix failed gate ${gateResult.failedGate.id}: ${gateResult.failedGate.command}`,
         `Exit code: ${gateResult.result.code}`,
+        `Failure context:\n${JSON.stringify(processFailureDetails(gateResult.result), null, 2)}`,
         protectedPathInstruction,
         `Current diff:\n${diff}`,
       ]
@@ -258,7 +382,13 @@ export class Orchestrator {
         .join("\n\n");
       const fix = await opencode.implement(fixPrompt, protectedPathInstruction);
       if (fix.code !== 0)
-        return this.failTask(task, "opencode_fix", `OpenCode fix exited ${fix.code}.`, fix, gateResult.failedGate);
+        return this.failTask(
+          task,
+          fix.timedOut ? "opencode_timeout" : "opencode",
+          fix.timedOut ? "OpenCode fix timed out." : `OpenCode fix exited ${fix.code}.`,
+          fix,
+          gateResult.failedGate,
+        );
       const changedProtectedPaths = protectedPathsAllowed ? [] : protectedChangedFiles(await git.changedFiles());
       if (changedProtectedPaths.length > 0) {
         return this.failTask(
@@ -271,9 +401,18 @@ export class Orchestrator {
       }
       nextGate = gateResult.failedGate.id;
     }
+    await taskLogger.info("task.phase", { phase: "review" });
     const review = await opencode.review({ diff: await git.currentDiff() });
     task.latestReview = review.result;
-    if (review.result.status !== "clean") return this.failTask(task, "review", review.result.summary, review.raw);
+    if (review.result.status !== "clean") {
+      return this.failTask(
+        task,
+        review.raw.timedOut ? "opencode_timeout" : review.ok ? "review_findings" : "review_contract",
+        review.raw.timedOut ? "OpenCode review timed out." : review.result.summary,
+        review.raw,
+      );
+    }
+    await taskLogger.info("task.phase", { phase: "commit" });
     const commit = await git.commit(review.result.summary || "automated task");
     task.status = "ready_for_push";
     task.commitHash = commit;
@@ -306,13 +445,15 @@ export class Orchestrator {
 
   async failTask(
     task: Task,
-    type: string,
+    type: FailureType,
     summary: string,
     result: ProcessResult | undefined,
     gate: Gate | null = null,
   ): Promise<void> {
     task.status = "failed";
-    task.latestFailure = { type, summary, code: result?.code, gate };
+    task.latestFailure = { type, summary, gate, ...processFailureDetails(result) };
+    if (type === "review_findings" || type === "review_contract")
+      task.latestFailure.review = task.latestReview || undefined;
     task.lastFailedGate = gate;
     task.updatedAt = now();
     await new Logger(task.logPath).error("task.failed", task.latestFailure);
@@ -320,26 +461,47 @@ export class Orchestrator {
   }
 
   async discard(bot: TelegramSender, chatId: string, text: string): Promise<unknown> {
+    const state = await this.store.readState();
     const task = await this.store.activeTask();
-    if (!task || !["failed", "ready_for_push"].includes(task.status)) return bot.send(chatId, "No discardable task.");
-    const wantsConfirm = text.trim() === "confirm" || this.discardRequestedFor === task.id;
+    if (!task && !state.recoveryLock) return bot.send(chatId, "No discardable task or recovery lock.");
+    if (task && !["failed", "ready_for_push"].includes(task.status)) return bot.send(chatId, "No discardable task.");
+    const targetId = task?.id || "recovery-lock";
+    const confirmedByWindow =
+      this.discardConfirmation?.taskId === targetId && this.discardConfirmation.expiresAt > Date.now();
+    const wantsConfirm = text.trim() === "confirm" || confirmedByWindow;
     if (!wantsConfirm) {
-      this.discardRequestedFor = task.id;
-      return bot.send(chatId, `Send /discard again or /discard confirm to delete local work for ${task.id}.`);
+      this.discardConfirmation = { taskId: targetId, expiresAt: Date.now() + 60_000 };
+      return bot.send(
+        chatId,
+        `Send /discard again within 60s or /discard confirm to delete local autonomous work for ${targetId}.`,
+      );
     }
-    const git = new GitClient(this.config, this.logger.withFile(task.logPath));
-    await git.discardBranch(task.branch);
-    task.status = "discarded";
-    task.updatedAt = now();
-    await new Logger(task.logPath).info("task.discarded", { branch: task.branch });
-    await this.store.writeTask(task);
-    await this.store.clearActiveTask();
-    this.discardRequestedFor = null;
-    return bot.send(chatId, `Discarded ${task.id}.`);
+    const git = new GitClient(this.config, task ? this.logger.withFile(task.logPath) : this.logger);
+    if (task) {
+      await git.discardBranch(task.branch);
+      task.status = "discarded";
+      task.updatedAt = now();
+      await new Logger(task.logPath).info("task.discarded", { branch: task.branch });
+      await this.store.writeTask(task);
+      await this.store.clearActiveTask();
+      this.discardConfirmation = null;
+      return bot.send(chatId, `Discarded ${task.id}.`);
+    }
+    await git.discardBranch(`autonomous/recovery-${Date.now()}`);
+    state.recoveryLock = null;
+    await this.store.writeState(state);
+    this.discardConfirmation = null;
+    return bot.send(chatId, "Cleared recovery lock and discarded local work.");
   }
 
   async archive(bot: TelegramSender, chatId: string): Promise<unknown> {
+    const state = await this.store.readState();
     const task = await this.store.activeTask();
+    if (!task && state.recoveryLock) {
+      state.recoveryLock = null;
+      await this.store.writeState(state);
+      return bot.send(chatId, "Archived recovery lock. Repository work was left untouched.");
+    }
     if (!task || !["failed", "ready_for_push"].includes(task.status)) return bot.send(chatId, "No archivable task.");
     task.status = "archived";
     task.updatedAt = now();
@@ -353,7 +515,13 @@ export class Orchestrator {
     const state = await this.store.readState();
     const task = state.activeTaskId ? await this.store.readTask(state.activeTaskId) : null;
     if (!task) {
-      return [`State: idle`, `Runtime phase: ${this.phase}`, "Next: /run <prompt>", "History: /tasks or /logs latest"]
+      return [
+        state.recoveryLock ? "State: recovery_lock" : "State: idle",
+        `Runtime phase: ${this.phase}`,
+        state.recoveryLock ? `Recovery lock: ${state.recoveryLock}` : "",
+        state.recoveryLock ? "Next: /doctor, /inspect, /discard confirm, or /archive" : "Next: /run <prompt>",
+        "History: /tasks or /logs latest",
+      ]
         .filter(Boolean)
         .join("\n");
     }
@@ -425,9 +593,71 @@ export class Orchestrator {
       lastEvent ? `Active last log: ${lastEvent.ts} ${lastEvent.message}` : "Active last log: none",
       `Recent task ids: ${state.recentTaskIds.length ? state.recentTaskIds.join(", ") : "none"}`,
       `Known task logs: ${logFiles.length ? logFiles.join(", ") : "none"}`,
+      `Recovery lock: ${state.recoveryLock || "none"}`,
     ]
       .filter(Boolean)
       .join("\n");
+  }
+
+  async failureText(args = ""): Promise<string> {
+    const selection = await this.selectTask(args);
+    if (!selection.task) return selection.error;
+    const failure = selection.task.latestFailure;
+    if (!failure) return `Task ${selection.task.id} has no recorded failure.`;
+    return [
+      `Failure for ${selection.task.id}:`,
+      `Type: ${failure.type}`,
+      `Summary: ${failure.summary}`,
+      failure.gate ? `Gate: ${failure.gate.id} (${failure.gate.command})` : "",
+      failure.code !== undefined ? `Exit code: ${failure.code}` : "",
+      failure.signal ? `Signal: ${failure.signal}` : "",
+      failure.timedOut ? "Timed out: yes" : "",
+      failure.stdoutTail ? `Stdout tail:\n${indentBlock(failure.stdoutTail)}` : "",
+      failure.stderrTail ? `Stderr tail:\n${indentBlock(failure.stderrTail)}` : "",
+      `Next: ${failureNextActions(failure.type)}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  async reviewText(args = ""): Promise<string> {
+    const selection = await this.selectTask(args);
+    if (!selection.task) return selection.error;
+    const review = selection.task.latestReview;
+    if (!review) return `Task ${selection.task.id} has no recorded review.`;
+    const findings = review.findings.map(
+      (finding, index) =>
+        `${index + 1}. ${finding.severity} ${finding.file}${finding.line ? `:${finding.line}` : ""}\n${finding.message}\nRecommendation: ${finding.recommendation}`,
+    );
+    return [`Review for ${selection.task.id}: ${review.status}`, review.summary, ...findings].join("\n");
+  }
+
+  async doctorText(): Promise<string> {
+    const git = new GitClient(this.config, this.logger);
+    const repoExists = await git.repoExists().catch(() => false);
+    const branch = repoExists ? await git.currentBranch().catch((error) => `error: ${errorMessage(error)}`) : "missing";
+    const dirty = repoExists ? await git.statusShort().catch((error) => `error: ${errorMessage(error)}`) : "";
+    const checks = await Promise.all([
+      writable(this.config.dataDir),
+      writable(this.config.logsDir),
+      access(this.config.toolingComposeFile)
+        .then(() => "present")
+        .catch(() => "missing"),
+      access("/var/run/docker.sock")
+        .then(() => "visible")
+        .catch(() => "not visible"),
+    ]);
+    return [
+      "Doctor:",
+      `Config: telegram token ${redacted(this.config.telegramBotToken)}, GitHub token ${redacted(this.config.targetGithubToken)}, OpenCode key ${redacted(this.config.opencodeApiKey)}`,
+      `Data dir writable: ${checks[0]}`,
+      `Logs dir writable: ${checks[1]}`,
+      `Target repo: ${repoExists ? this.config.targetRepoDir : "missing"}`,
+      `Current branch: ${branch || "unknown"}`,
+      `Dirty status: ${dirty ? dirty.split(/\r?\n/).slice(0, 20).join("; ") : "clean"}`,
+      `Docker socket: ${checks[3]}`,
+      `Tooling compose file: ${checks[2]} (${this.config.toolingComposeFile})`,
+    ].join("\n");
   }
 
   async selectTaskForLogs(
@@ -451,24 +681,21 @@ export class Orchestrator {
     if (!task) return { task: null, error: `Task not found: ${selector}` };
     return { task, lines, error: "" };
   }
-}
 
-function helpText(): string {
-  return [
-    "Commands:",
-    "/help",
-    "/status - read-only runtime and active task status",
-    "/tasks - read-only recent task history",
-    "/logs [active|latest|task-id] [lines] - read-only task log tail",
-    "/inspect - read-only runtime diagnostics",
-    "/run <prompt> - implementation task; may create a branch, edit the repo, and run install/build/lint/deps/test gates",
-    "/fix [extra instructions]",
-    "/discard",
-    "/discard confirm",
-    "/archive",
-    "/cancel",
-    "/push",
-  ].join("\n");
+  async selectTask(args: string): Promise<{ task: Task; error: string } | { task: null; error: string }> {
+    const selector = args.trim() || "active";
+    if (selector === "active") {
+      const task = await this.store.activeTask();
+      return task ? { task, error: "" } : { task: null, error: "No active task. Try latest or a task id." };
+    }
+    const tasks = await this.store.listTasks(50);
+    if (selector === "latest") {
+      const task = tasks[0] || null;
+      return task ? { task, error: "" } : { task: null, error: "No tasks found." };
+    }
+    const task = tasks.find((candidate) => candidate.id === selector || candidate.id.startsWith(selector));
+    return task ? { task, error: "" } : { task: null, error: `Task not found: ${selector}` };
+  }
 }
 
 function nextAction(status: TaskStatus): string {
@@ -487,9 +714,51 @@ function nextAction(status: TaskStatus): string {
 function failureText(failure: NonNullable<Task["latestFailure"]>): string {
   const parts = [failure.type];
   if (failure.code !== undefined) parts.push(`code ${failure.code}`);
+  if (failure.timedOut) parts.push("timeout");
   if (failure.gate) parts.push(`gate ${failure.gate.id}`);
   parts.push(failure.summary);
   return parts.join(": ");
+}
+
+function processFailureDetails(
+  result: ProcessResult | undefined,
+): Pick<NonNullable<Task["latestFailure"]>, "code" | "signal" | "timedOut" | "stdoutTail" | "stderrTail"> {
+  if (!result) return {};
+  return {
+    code: result.code,
+    signal: result.signal || null,
+    timedOut: result.timedOut || undefined,
+    stdoutTail: tailText(result.stdout),
+    stderrTail: tailText(result.stderr),
+  };
+}
+
+function taskEnvelope(kind: "run" | "fix", task: Task, body: string[]): string {
+  const allowedSideEffects =
+    kind === "run"
+      ? "Edit repository files needed to implement the operator's task. Do not commit, push, inspect Telegram, or perform control-plane actions."
+      : "Edit repository files only to resolve the recorded failure. Do not commit, push, inspect Telegram, or perform control-plane actions.";
+  return [
+    "Nanoclaw task envelope:",
+    `Task id: ${task.id}`,
+    `Task type: ${kind}`,
+    `Branch: ${task.branch}`,
+    `Base branch: ${task.baseBranch}`,
+    `Allowed side effects: ${allowedSideEffects}`,
+    "Protected paths policy: obey the protected path instructions in this prompt.",
+    "Expected output: leave the repo ready for automated gates and review.",
+    "Recovery context: if the requested work conflicts with current repo state, report the blocker in normal command output; do not push or discard.",
+    ...body,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function tailText(text: string | undefined): string | undefined {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return undefined;
+  const lines = trimmed.split(/\r?\n/).slice(-30).join("\n");
+  return truncate(lines, 3000);
 }
 
 function formatLogTail(text: string, lines: number): string {
@@ -577,6 +846,20 @@ function indentBlock(text: string): string {
 function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}\n... truncated ${text.length - maxLength} chars`;
+}
+
+async function writable(path: string): Promise<string> {
+  try {
+    await mkdir(path, { recursive: true });
+    await access(path, fsConstants.W_OK);
+    return "yes";
+  } catch {
+    return "no";
+  }
+}
+
+function redacted(value: string): string {
+  return value ? "set" : "missing";
 }
 
 async function lastLogEvent(path: string): Promise<LogEvent | null> {

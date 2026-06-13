@@ -42,8 +42,10 @@ services:
       VERIFY_TEST: ${VERIFY_TEST:-pnpm test}
       TOOLING_COMPOSE_FILE: ${TOOLING_COMPOSE_FILE:-deploy/nanoclaw-tooling/compose.yml}
       TOOLING_SERVICE: ${TOOLING_SERVICE:-polyglot-tooling}
+      NANOCLAW_WORKSPACE_HOST_DIR: ${NANOCLAW_WORKSPACE_HOST_DIR:?NANOCLAW_WORKSPACE_HOST_DIR is required}
+      NANOCLAW_POLYGLOT_HOST_DIR: ${NANOCLAW_POLYGLOT_HOST_DIR:-${NANOCLAW_WORKSPACE_HOST_DIR:?NANOCLAW_WORKSPACE_HOST_DIR is required}/Polyglot}
     volumes:
-      - ./workspace:/workspace
+      - ${NANOCLAW_WORKSPACE_HOST_DIR:?NANOCLAW_WORKSPACE_HOST_DIR is required}:/workspace
       - ./logs:/logs
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
