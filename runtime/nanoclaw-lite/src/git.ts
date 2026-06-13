@@ -73,6 +73,16 @@ export class GitClient {
     return result.stdout.trim();
   }
 
+  async changedFiles(): Promise<string[]> {
+    const base = `origin/${quote(this.config.targetBranch)}`;
+    const committed = await this.git(`diff --name-only ${base}...HEAD`, this.config.targetRepoDir, true);
+    const workingTree = await this.git("diff --name-only HEAD", this.config.targetRepoDir, true);
+    const untracked = await this.git("ls-files --others --exclude-standard", this.config.targetRepoDir, true);
+    return [...committed.stdout.split("\n"), ...workingTree.stdout.split("\n"), ...untracked.stdout.split("\n")]
+      .map((file) => file.trim())
+      .filter((file, index, all) => file && all.indexOf(file) === index);
+  }
+
   async commit(summary: string): Promise<string | null> {
     await this.git("add -A");
     const status = await this.statusShort();

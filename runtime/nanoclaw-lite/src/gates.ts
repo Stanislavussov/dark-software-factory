@@ -1,7 +1,34 @@
 import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { shell } from "./process.js";
+import { type ProcessResult, shell } from "./process.js";
 import type { ChildHandler, GateRunResult, LoggerLike, RuntimeConfig } from "./types.js";
+
+export type GateFailureClassification = { type: "infra_gate"; summary: string } | { type: "app_gate" };
+
+const INFRA_GATE_PATTERNS: Array<{ pattern: RegExp; summary: string }> = [
+  { pattern: /\bnode_modules\b.*\bmissing\b/i, summary: "node_modules are missing in the tooling workspace." },
+  {
+    pattern: /\btsc:\s*(?:not found|command not found)\b/i,
+    summary: "TypeScript is unavailable in the tooling workspace.",
+  },
+  {
+    pattern: /Cannot find module .*[\\/]node_modules\b/i,
+    summary: "A package module under node_modules is unavailable in the tooling workspace.",
+  },
+  {
+    pattern: /Biome couldn't find an ignore file/i,
+    summary: "Biome cannot find the configured ignore file in the tooling workspace.",
+  },
+  { pattern: /\bpnpm:\s*(?:not found|command not found)\b/i, summary: "pnpm is unavailable in the tooling workspace." },
+  {
+    pattern: /(?:No such file or directory|cannot access|can't open).*[\\/]workspace[\\/]package\.json/i,
+    summary: "The mounted workspace does not contain package.json.",
+  },
+  {
+    pattern: /ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND|No package\.json.*(?:\/workspace|workspace)/i,
+    summary: "pnpm cannot find package.json in the tooling workspace.",
+  },
+];
 
 export class GateRunner {
   config: RuntimeConfig;
@@ -56,6 +83,12 @@ export class GateRunner {
     }
     return { ok: true };
   }
+}
+
+export function classifyGateFailure(result: ProcessResult): GateFailureClassification {
+  const text = `${result.stdout}\n${result.stderr}`;
+  const match = INFRA_GATE_PATTERNS.find(({ pattern }) => pattern.test(text));
+  return match ? { type: "infra_gate", summary: match.summary } : { type: "app_gate" };
 }
 
 function quote(value: string): string {

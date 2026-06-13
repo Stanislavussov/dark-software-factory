@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PublicConfigSnapshot, RuntimeConfig, RuntimeState, Task, TaskStatus } from "./types.js";
 
@@ -63,6 +63,18 @@ export class StateStore {
     return this.readTask(state.activeTaskId);
   }
 
+  async listTasks(limit = 20): Promise<Task[]> {
+    const state = await this.readState();
+    const fromState = state.recentTaskIds;
+    const fromDisk = await this.taskIdsFromDisk();
+    const ids = [...fromState, ...fromDisk].filter((id, index, all) => all.indexOf(id) === index);
+    const tasks = await Promise.all(ids.map((id) => this.readTask(id).catch(() => null)));
+    return tasks
+      .filter((task): task is Task => task !== null)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit);
+  }
+
   async setActiveTask(task: Task): Promise<void> {
     const state = await this.readState();
     state.activeTaskId = task.id;
@@ -75,6 +87,16 @@ export class StateStore {
     const state = await this.readState();
     state.activeTaskId = null;
     await this.writeState(state);
+  }
+
+  async taskIdsFromDisk(): Promise<string[]> {
+    try {
+      const entries = await readdir(this.tasksDir);
+      return entries.filter((entry) => entry.endsWith(".json")).map((entry) => entry.slice(0, -".json".length));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      return [];
+    }
   }
 }
 
