@@ -242,6 +242,7 @@ export class Orchestrator {
     task.latestFailure = { type, summary, code: result?.code, gate };
     task.lastFailedGate = gate;
     task.updatedAt = now();
+    await new Logger(task.logPath).error("task.failed", task.latestFailure);
     await this.store.writeTask(task);
   }
 
@@ -282,8 +283,11 @@ export class Orchestrator {
       `Branch: ${task.branch}`,
       `Base: ${task.baseBranch}`,
       `Last gate: ${task.lastFailedGate?.id || "none"}`,
+      task.latestFailure ? `Failure: ${failureText(task.latestFailure)}` : "",
       `Next: ${nextAction(task.status)}`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   async logsText(): Promise<string> {
@@ -326,6 +330,14 @@ function nextAction(status: TaskStatus): string {
     archived: "/run <prompt>",
   };
   return actions[status];
+}
+
+function failureText(failure: NonNullable<Task["latestFailure"]>): string {
+  const parts = [failure.type];
+  if (failure.code !== undefined) parts.push(`code ${failure.code}`);
+  if (failure.gate) parts.push(`gate ${failure.gate.id}`);
+  parts.push(failure.summary);
+  return parts.join(": ");
 }
 
 function tail(text: string, lines: number): string {

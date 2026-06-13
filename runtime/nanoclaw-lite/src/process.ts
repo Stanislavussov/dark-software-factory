@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 import type { Env, LoggerLike } from "./types.js";
 
 export type ProcessResult = {
@@ -51,12 +52,12 @@ export function runProcess({
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       stdout += text;
-      logger?.info("subprocess.stdout", { command, text: text.trimEnd() });
+      logSubprocessOutput(logger, "subprocess.stdout", command, text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       stderr += text;
-      logger?.info("subprocess.stderr", { command, text: text.trimEnd() });
+      logSubprocessOutput(logger, "subprocess.stderr", command, text);
     });
     child.on("error", (error) => {
       if (settled) return;
@@ -78,4 +79,10 @@ export function shell(
   options: Omit<ProcessOptions, "command" | "args" | "input">,
 ): Promise<ProcessResult> {
   return runProcess({ command: "sh", args: ["-lc", command], ...options });
+}
+
+function logSubprocessOutput(logger: LoggerLike | undefined, message: string, command: string, text: string): void {
+  const cleanText = stripVTControlCharacters(text).trimEnd();
+  if (!cleanText) return;
+  logger?.info(message, { command, text: cleanText });
 }
