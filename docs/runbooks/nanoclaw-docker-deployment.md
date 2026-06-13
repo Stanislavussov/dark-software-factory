@@ -41,6 +41,8 @@ Create these GitHub Actions variables:
 - `OPENCODE_GO_API_BASE`, optional; set to `http://oc-go-cc:3456/v1` only when using the proxy sidecar
 - `TARGET_REPO`, optional, defaults to `https://github.com/Stanislavussov/Polyglot`
 - `TARGET_BRANCH`, optional, defaults to `master`
+- `NANOCLAW_WORKSPACE_HOST_DIR`, required by `deploy/nanoclaw/compose.yml`; the workflow writes `${VPS_APP_ROOT}/nanoclaw/workspace`
+- `NANOCLAW_POLYGLOT_HOST_DIR`, optional; defaults to `${NANOCLAW_WORKSPACE_HOST_DIR}/Polyglot`, override if the Polyglot checkout lives elsewhere on the host
 - `MAX_FIX_ATTEMPTS`, optional, defaults to `3`
 - `LOG_TAIL_LINES`, optional, defaults to `80`
 - `CANCEL_GRACE_MS`, optional, defaults to `10000`
@@ -108,6 +110,8 @@ deploy/nanoclaw-tooling/compose.yml
 ```
 
 The compose file exposes a `polyglot-tooling` service with Node 26 and pnpm 10.14.0. `nanoclaw-lite` runs commands through that service rather than installing Polyglot tooling on the VPS host or inside the runtime image.
+
+When Nanoclaw starts sibling tooling containers through `/var/run/docker.sock`, bind mount paths are resolved by the host Docker daemon. Keep `NANOCLAW_WORKSPACE_HOST_DIR` pointed at the host-visible workspace directory mounted into Nanoclaw at `/workspace`. The Polyglot tooling compose uses `NANOCLAW_POLYGLOT_HOST_DIR` (defaults to `NANOCLAW_WORKSPACE_HOST_DIR/Polyglot`) to mount the Polyglot repository directly into its own `/workspace`.
 
 ## Local Smoke Test
 
